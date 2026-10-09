@@ -1,0 +1,170 @@
+// RBP（Risk Binary Protocol）风控二进制协议 v0.2.0
+// RGW 网关 ↔ 风控引擎 点对点内部协议（对齐 omni-rt-risk/docs/03-风控二进制协议RBP设计.md v0.3）
+// 帧格式：帧头（定长 32B，大端）+ 帧体（msg_type 分发）。
+// 内部协议不含登录/心跳/会话管理消息，会话由传输层（TCP/SHM）承担。
+// Checksum = 帧体字节累加 & 0xFF，由应用层计算/校验（flags.NO_CHECKSUM 时置 0 跳过），
+// 故此处保持普通字段传递，不使用 @calculatedFrom 自动填充。
+options {
+    StringPrefixLenType = u32;
+    ArrayPrefixLenType = u32;
+    LittleEndian = false;
+    JavaPackage = "com.finproto.risk.bin.messages";
+    GoPackage = "risk_bin";
+    GoModule = "github.com/xinchentechnote/fin-proto-go/risk-bin/messages"
+}
+
+root packet RbpBinary {
+    uint32 MsgType `消息类型（见 match 注册表）`,
+    uint16 Version `协议版本，首版 = 1`,
+    uint16 Flags `bit0=REPLY_EXPECTED bit2=DROPPABLE bit3=NO_TEXT bit4=NO_CHECKSUM`,
+    uint64 MsgSeq `发送方会话内单调递增（从 1 开始）`,
+    uint64 TsNs `发送时刻（纳秒，同源时钟 NTP/PTP）`,
+    @lengthOf(Body)
+    uint32 BodyLen `帧体长度`,
+    uint32 Checksum `帧体字节累加 & 0xFF（NO_CHECKSUM 时置 0）`,
+    match MsgType as Body {
+        16 : NewOrderReq,
+        17 : CancelReq,
+        18 : OrderConfirm,
+        19 : TradeReport,
+        20 : CancelReject,
+        21 : OrderReject,
+        32 : RiskResult,
+        48 : Instruction,
+        49 : InstrAck,
+    },
+}
+
+// ======================= 事前校验流（同步） =======================
+
+// 委托事前校验请求（网关→引擎，flags.REPLY_EXPECTED=1）
+packet NewOrderReq {
+    uint64 ReqID `关联键，RiskResult 回显`,
+    uint16 ChannelID `网关通道号`,
+    uint8 Adapter `1=SSE 2=SZSE 3=BSE 4=CTP 5=FEMAS 6=HS 7=APEX`,
+    char[16] Account `证券账户`,
+    char[16] AccountGroup `账户组（实控人/产品）`,
+    char[16] ClOrdID `委托唯一键`,
+    char[12] SecurityID `证券/合约代码`,
+    uint8 Market `市场 1=沪 2=深 3=北`,
+    uint8 Side `买卖方向 1=买 2=卖`,
+    int64 Price `申报价格（最小变动价位整数倍）`,
+    int64 OrderQty `申报数量`,
+    uint8 OrdType `订单类型 1=限价 2=市价 3=对手方最优 4=本方最优`,
+    uint8 TimeInForce `有效期 0=Day 1=IOC 2=FOK`,
+    char[8] Pbu `交易单元`,
+    uint64 TransactTime `原始报文交易时间`,
+    uint64 TsRecvNs `网关收帧时刻（引擎回显，测单向时延）`,
+    uint64 RawRef `网关 WAL 帧号（审计回溯）`,
+}
+
+// 撤单事前校验请求（网关→引擎，flags.REPLY_EXPECTED=1）
+packet CancelReq {
+    uint64 ReqID `关联键，RiskResult 回显`,
+    uint16 ChannelID `网关通道号`,
+    uint8 Adapter `1=SSE 2=SZSE 3=BSE 4=CTP 5=FEMAS 6=HS 7=APEX`,
+    char[16] Account `证券账户`,
+    char[16] ClOrdID `撤单请求唯一键`,
+    char[16] OrigClOrdID `被撤委托唯一键`,
+    char[12] SecurityID `证券/合约代码`,
+    uint8 Side `原委托买卖方向 1=买 2=卖`,
+    uint64 TsRecvNs `网关收帧时刻（引擎回显，测单向时延）`,
+    uint64 RawRef `网关 WAL 帧号（审计回溯）`,
+}
+
+// ======================= 风控结果（同步应答） =======================
+
+// 风控结果（引擎→网关）
+packet RiskResult {
+    uint64 ReqID `回显请求关联键`,
+    uint8 Decision `0=Pass 放行 1=Block 阻断 2=Warn 放行+告警（灰度）`,
+    uint16 Code `风控原因码（Block 时必填）`,
+    uint16 RuleID `命中规则标识（审计定位）`,
+    uint64 TsRecvNs `回显请求的 TsRecvNs，单向时延 = 引擎发出时刻 − TsRecvNs`,
+    uint64 TsEngineNs `引擎决策完成时刻`,
+    char[48] Text `人类可读说明（flags.NO_TEXT 时全 0）`,
+}
+
+// ==================== 回报转发流（异步，无应答） ====================
+
+// 委托确认（受理回执）
+packet OrderConfirm {
+    uint64 ReqID `0=非事前请求关联（如交易所直接回报）`,
+    uint16 ChannelID `网关通道号`,
+    uint8 Adapter `1=SSE 2=SZSE 3=BSE 4=CTP 5=FEMAS 6=HS 7=APEX`,
+    char[16] Account `证券账户`,
+    char[16] ClOrdID `委托唯一键`,
+    char[16] OrderID `交易所订单编号`,
+    uint8 OrdStatus `订单状态 1=已受理 2=全部成交 3=部分成交 4=已撤 5=废单`,
+    uint64 TsNs `回报时刻`,
+    uint64 RawRef `网关 WAL 帧号（审计回溯）`,
+}
+
+// 成交回报
+packet TradeReport {
+    uint64 ReqID `0=非事前请求关联（如交易所直接回报）`,
+    uint16 ChannelID `网关通道号`,
+    uint8 Adapter `1=SSE 2=SZSE 3=BSE 4=CTP 5=FEMAS 6=HS 7=APEX`,
+    char[16] Account `证券账户`,
+    char[16] ClOrdID `委托唯一键`,
+    char[16] OrderID `交易所订单编号`,
+    char[16] ExecID `成交编号`,
+    uint8 ExecType `执行类型 0=成交 1=撤销`,
+    uint8 OrdStatus `订单状态 1=已受理 2=全部成交 3=部分成交 4=已撤 5=废单`,
+    char[12] SecurityID `证券/合约代码`,
+    uint8 Side `买卖方向 1=买 2=卖`,
+    int64 LastPx `成交价格`,
+    int64 LastQty `成交数量`,
+    int64 CumQty `累计成交数量`,
+    int64 LeavesQty `剩余数量`,
+    uint64 TsNs `回报时刻`,
+    uint64 RawRef `网关 WAL 帧号（审计回溯）`,
+}
+
+// 撤单失败
+packet CancelReject {
+    uint64 ReqID `0=非事前请求关联（如交易所直接回报）`,
+    uint16 ChannelID `网关通道号`,
+    uint8 Adapter `1=SSE 2=SZSE 3=BSE 4=CTP 5=FEMAS 6=HS 7=APEX`,
+    char[16] Account `证券账户`,
+    char[16] ClOrdID `撤单请求唯一键`,
+    char[16] OrigClOrdID `被撤委托唯一键`,
+    uint16 ReasonCode `0=已成交不可撤 1=已完成 2=不存在 3=其他`,
+    char[32] Text `拒绝说明`,
+    uint64 TsNs `回报时刻`,
+    uint64 RawRef `网关 WAL 帧号（审计回溯）`,
+}
+
+// 委托拒绝（预留，交易所/柜台拒单）
+packet OrderReject {
+    uint64 ReqID `0=非事前请求关联（如交易所直接回报）`,
+    uint16 ChannelID `网关通道号`,
+    uint8 Adapter `1=SSE 2=SZSE 3=BSE 4=CTP 5=FEMAS 6=HS 7=APEX`,
+    char[16] Account `证券账户`,
+    char[16] ClOrdID `被拒委托唯一键`,
+    char[16] OrigClOrdID `原委托唯一键`,
+    uint16 ReasonCode `拒绝原因码`,
+    char[32] Text `拒绝说明`,
+    uint64 TsNs `回报时刻`,
+    uint64 RawRef `网关 WAL 帧号（审计回溯）`,
+}
+
+// ==================== 实时指令流（异步，需 ACK） ====================
+
+// 实时指令（引擎/管控→网关）
+packet Instruction {
+    uint64 InstrID `引擎侧单调，幂等键`,
+    uint16 InstrType `1=BypassOn 2=BypassOff 3=BlockAccount 4=UnblockAccount 5=BlockSecurity 6=UnblockSecurity 7=CancelAllOrders 8=FreezeInflow 9=KillSwitch 10=ReloadRules`,
+    uint8 TargetType `0=channel 1=account 2=security 3=global`,
+    char[32] Target `channel_id/account/security_id 字符串形式，global 置空`,
+    uint64 ExpiryNs `有效期绝对时刻，0=长期有效`,
+    char[16] Operator `操作人（管理面审计字段）`,
+    uint64 TsNs `下发时刻`,
+}
+
+// 指令应答（网关→引擎）
+packet InstrAck {
+    uint64 InstrID `回显指令幂等键`,
+    uint8 Result `0=已执行 1=不适用 2=目标无效 3=拒绝执行`,
+    uint64 TsNs `应答时刻`,
+}
