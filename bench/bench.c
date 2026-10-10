@@ -7,6 +7,8 @@
  * Output is one TSV line per case on stdout:
  *   lib \t lang \t op \t ns_per_op \t frame_bytes
  */
+/* clock_gettime/CLOCK_MONOTONIC are POSIX; -std=c11 hides them otherwise */
+#define _POSIX_C_SOURCE 199309L
 #include "root.h"
 
 #include <stdio.h>
