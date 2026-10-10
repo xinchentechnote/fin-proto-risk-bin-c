@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Build fin-protoc
+        run: |
+          git clone --depth 1 https://github.com/xinchentechnote/fin-protoc.git /tmp/fin-protoc
+          cd /tmp/fin-protoc && go build -o /tmp/bin/fin-protoc ./cmd
+      - name: Test
+        run: FIN_PROTOC=/tmp/bin/fin-protoc make test CC=${{ matrix.cc }}
+      - name: Bench (smoke run)
+        run: FIN_PROTOC=/tmp/bin/fin-protoc make bench CC=${{ matrix.cc }}
+
+  codegen-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Build fin-protoc
+        run: |
+          git clone --depth 1 https://github.com/xinchentechnote/fin-protoc.git /tmp/fin-protoc
+          cd /tmp/fin-protoc && go build -o /tmp/bin/fin-protoc ./cmd
+      - name: Regenerate src from DSL
+        run: /tmp/bin/fin-protoc -f proto/risk_v0.2.0.pdsl -C src/
+      - name: Fail if generated code drifted
+        run: |
+          if ! git diff --exit-code -- src/; then
+            echo "::error::src/ does not match fin-protoc output for proto/*.pdsl. Run 'make compile' locally and commit the result."
+            exit 1
+          fi
