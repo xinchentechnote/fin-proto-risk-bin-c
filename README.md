@@ -1,36 +1,46 @@
-# fin-proto-sse-bin-c
+# fin-proto-risk-bin-c
 
-上交所(step)二进制行情协议 v0.2.0 的 C11 消息库,基于
-[fin-proto-runtime-bin-c](../fin-proto-runtime-bin-c) 运行时。
-对应 Rust 版本:[fin-proto-risk-bin-rs](https://github.com/xinchentechnote/fin-proto-sse-bin-rs)。
+RBP(Risk Binary Protocol)风控二进制协议 v0.2.0 的 C11 消息库,用于
+RGW 网关 ↔ 风控引擎的点对点内部通信,基于
+[fin-proto-runtime-bin-c](https://github.com/xinchentechnote/fin-proto-runtime-bin-c) 运行时。
+对应 Rust 版本:[fin-proto-risk-bin-rs](https://github.com/xinchentechnote/fin-proto-risk-bin-rs)。
 
 `src/` 下的全部 `.h/.c` 文件由 [fin-protoc](https://github.com/xinchentechnote/fin-protoc)
-从 `proto/sse_bin_v0.2.0.pdsl` 生成(`-C` 指定输出目录),请勿手改:
+从 `proto/risk_v0.2.0.pdsl` 生成(`-C` 指定输出目录),请勿手改:
 
 ```bash
-make compile    # fin-protoc -f proto/sse_bin_v0.2.0.pdsl -C src/
+make compile    # fin-protoc -f proto/risk_v0.2.0.pdsl -C src/
 ```
 
-## 线上格式(全部大端)
+## 线上格式(帧头定长 32B,全部大端)
 
 ```
-SseBinary:
+RbpBinary:
 ┌──────────────┬────┬────────────────────────────────────────────────┐
 │ MsgType u32  │ 4B │ 消息类型,决定 Body 的具体消息                      │
-│ MsgSeqNum u64│ 8B │ 序列号                                          │
-│ MsgBodyLen u32│ 4B│ Body 字节数(不含头部与校验和)                     │
-│ Body         │变长│ 14 种消息之一,字段全部定长                         │
-│ Checksum u32 │ 4B │ SSE_BIN 算法(除校验和外全部字节累加和 & 0xFF)      │
+│ Version u16  │ 2B │ 协议版本,首版 = 1                                │
+│ Flags u16    │ 2B │ bit0=REPLY_EXPECTED bit2=DROPPABLE               │
+│              │    │ bit3=NO_TEXT bit4=NO_CHECKSUM                    │
+│ MsgSeq u64   │ 8B │ 发送方会话内单调递增(从 1 开始)                     │
+│ TsNs u64     │ 8B │ 发送时刻(纳秒,同源时钟 NTP/PTP)                    │
+│ BodyLen u32  │ 4B │ Body 字节数                                       │
+│ Checksum u32 │ 4B │ Body 字节累加和 & 0xFF,由应用层计算/校验            │
+│              │    │ (flags.NO_CHECKSUM 时置 0 跳过)                    │
+│ Body         │变长│ 9 种消息之一,字段全部定长                          │
 └──────────────┴────┴────────────────────────────────────────────────┘
 ```
+
+内部协议不含登录/心跳/会话管理消息,会话由传输层(TCP/SHM)承担。9 种消息:
+NewOrderReq、CancelReq、OrderConfirm、TradeReport、CancelReject、OrderReject、
+RiskResult、Instruction、InstrAck。
 
 C 版以 `kind` 枚举 + 匿名 union 表达 match 多态:
 
 ```c
-sse_binary_sse_binary msg;
+rbp_binary_rbp_binary msg;
 memset(&msg, 0, sizeof(msg));
-msg.body_tag = SSE_BINARY_BODY_LOGON;
-msg.body.logon.sender_comp_id = FC_STR("SENDER");
+msg.body_tag = RBP_BINARY_BODY_NEW_ORDER_REQ;
+msg.body.new_order_req.cl_ord_id = FC_STR("C0001");
 ```
 
 ## 使用
