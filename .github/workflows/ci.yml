@@ -14,6 +14,11 @@ jobs:
         cc: [gcc, clang]
     steps:
       - uses: actions/checkout@v4
+      - name: Check out runtime dependency
+        uses: actions/checkout@v4
+        with:
+          repository: xinchentechnote/fin-proto-runtime-bin-c
+          path: runtime
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
@@ -23,9 +28,9 @@ jobs:
           git clone --depth 1 https://github.com/xinchentechnote/fin-protoc.git /tmp/fin-protoc
           cd /tmp/fin-protoc && go build -o /tmp/bin/fin-protoc ./cmd
       - name: Test
-        run: FIN_PROTOC=/tmp/bin/fin-protoc make test CC=${{ matrix.cc }}
+        run: FIN_PROTOC=/tmp/bin/fin-protoc make test CC=${{ matrix.cc }} RUNTIME=$GITHUB_WORKSPACE/runtime
       - name: Bench (smoke run)
-        run: FIN_PROTOC=/tmp/bin/fin-protoc make bench CC=${{ matrix.cc }}
+        run: FIN_PROTOC=/tmp/bin/fin-protoc make bench CC=${{ matrix.cc }} RUNTIME=$GITHUB_WORKSPACE/runtime
 
   codegen-check:
     runs-on: ubuntu-latest
